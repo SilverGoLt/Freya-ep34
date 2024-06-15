@@ -2,7 +2,6 @@ package packet
 
 import (
 	"github.com/ubis/Freya/cmd/gameserver/context"
-	"github.com/ubis/Freya/share/log"
 	"github.com/ubis/Freya/share/models/inventory"
 	"github.com/ubis/Freya/share/network"
 )
@@ -31,11 +30,23 @@ func StackItem(dst *inventory.Item, src context.ItemHandler) bool {
 	return true
 }
 
-func ItemLooting(session *network.Session, reader *network.Reader) {
+// ItemLooting Packet
+func ItemLooting(session *Session, reader *network.Reader) {
+	if !verifyState(session, StateInGame, reader.Type) {
+		return
+	}
+
 	id := reader.ReadInt32()
 	key := reader.ReadUint16()
 	_ = reader.ReadUint32() // kind idx
 	slot := reader.ReadUint16()
+
+	world := GetCurrentWorld(session)
+	if world == nil {
+		session.LogErrorf("Unable to find current world for character: %d ",
+			session.Character.Id)
+		return
+	}
 
 	const (
 		statusOk = 0x60 + iota
@@ -46,25 +57,6 @@ func ItemLooting(session *network.Session, reader *network.Reader) {
 		statusOutOfRange
 	)
 
-	ctx, err := context.Parse(session)
-	if err != nil {
-		log.Error(err.Error())
-		return
-	}
-
-	ctx.Mutex.RLock()
-	charId := ctx.Char.Id
-	world := ctx.World
-	x, y := ctx.Char.X, ctx.Char.Y
-	ctx.Mutex.RUnlock()
-
-	currentItem := ctx.Char.Inventory.Get(slot)
-
-	if world == nil {
-		log.Error("Unable to get current world!")
-		return
-	}
-
 	item := world.PeekItem(id, key)
 	if item == nil {
 		// such item does not exist
@@ -72,10 +64,11 @@ func ItemLooting(session *network.Session, reader *network.Reader) {
 	}
 
 	// check looting position
+	x, y := session.Character.GetPosition()
 	itemX, itemY := item.GetPosition()
 	distX, distY := int(x)-int(itemX), int(y)-int(itemY)
 	if distX < -10 || distX > 10 || distY < -10 || distY > 10 {
-		pkt := network.NewWriter(ITEMLOOTING)
+		pkt := network.NewWriter(CSCItemLooting)
 		pkt.WriteByte(statusOutOfRange)
 		pkt.WriteUint32(0)
 		pkt.WriteInt32(0)
@@ -86,8 +79,8 @@ func ItemLooting(session *network.Session, reader *network.Reader) {
 	}
 
 	// owner pick-up duration was not expired yet
-	if !item.IsOwnerExpired() && item.GetOwner() != charId {
-		pkt := network.NewWriter(ITEMLOOTING)
+	if !item.IsOwnerExpired() && item.GetOwner() != session.Character.Id {
+		pkt := network.NewWriter(CSCItemLooting)
 		pkt.WriteByte(statusOwnerFail)
 		pkt.WriteUint32(0)
 		pkt.WriteInt32(0)
@@ -99,9 +92,10 @@ func ItemLooting(session *network.Session, reader *network.Reader) {
 
 	// check inventory slot is already in use
 	// also check if it should be stacked
+	currentItem := session.Character.Inventory.Get(slot)
 	isStacked := StackItem(&currentItem, item)
 	if !isStacked && currentItem.Kind != 0 {
-		pkt := network.NewWriter(ITEMLOOTING)
+		pkt := network.NewWriter(CSCItemLooting)
 		pkt.WriteByte(statusAlreadyUseSlot)
 		pkt.WriteUint32(0)
 		pkt.WriteInt32(0)
@@ -124,19 +118,21 @@ func ItemLooting(session *network.Session, reader *network.Reader) {
 		invItem.Option = currentItem.Option
 	}
 
-	state, err := false, nil
+	state := false
+	var err error
 
 	if isStacked {
-		state, err = ctx.Char.Inventory.Stack(slot, currentItem.Option)
+		state, err = session.Character.Inventory.Stack(slot, currentItem.Option)
 	} else {
-		state, err = ctx.Char.Inventory.Set(slot, *invItem)
+		state, err = session.Character.Inventory.Set(slot, *invItem)
 	}
 
 	if err != nil {
-		log.Error(err.Error())
+		session.LogErrorf("An error occurred: %s for character: %d ",
+			err.Error(), session.Character.Id)
 	}
 
-	pkt := network.NewWriter(ITEMLOOTING)
+	pkt := network.NewWriter(CSCItemLooting)
 
 	if state {
 		pkt.WriteByte(statusOk)
@@ -153,7 +149,7 @@ func ItemLooting(session *network.Session, reader *network.Reader) {
 }
 
 func NewItemSingle(item context.ItemHandler, dropped bool) *network.Writer {
-	pkt := network.NewWriter(NFY_NEWITEMLIST)
+	pkt := network.NewWriter(NFYNewItemList)
 	pkt.WriteByte(1)
 
 	pkt.WriteInt32(item.GetId())
@@ -184,7 +180,7 @@ func NewItemSingle(item context.ItemHandler, dropped bool) *network.Writer {
 func NewItemList(items []context.ItemHandler) *network.Writer {
 	count := len(items)
 
-	pkt := network.NewWriter(NFY_NEWITEMLIST)
+	pkt := network.NewWriter(NFYNewItemList)
 	pkt.WriteByte(count)
 
 	for _, i := range items {
@@ -207,7 +203,7 @@ func NewItemList(items []context.ItemHandler) *network.Writer {
 
 func DelItemList(id int32, reason byte) *network.Writer {
 
-	pkt := network.NewWriter(NFY_DELITEMLIST)
+	pkt := network.NewWriter(NFYDelItemList)
 	pkt.WriteInt32(id)
 	pkt.WriteByte(reason)
 

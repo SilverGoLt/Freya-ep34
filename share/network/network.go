@@ -6,26 +6,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ubis/Freya/share/encryption"
 	"github.com/ubis/Freya/share/event"
 	"github.com/ubis/Freya/share/log"
-	"github.com/ubis/Freya/share/models/server"
 )
 
 type Network struct {
-	lock     sync.RWMutex
-	clients  map[uint16]*Session
-	userIdx  uint16
-	settings *server.Settings
+	lock    sync.RWMutex
+	clients map[uint16]*Session
+	userIdx uint16
 }
 
 // Network initialization
-func (n *Network) Init(port int, s *server.Settings) {
+func (n *Network) Init(port int, xor *encryption.XorKeyTable) {
 	log.Info("Configuring network...")
 
 	n.lock = sync.RWMutex{}
 	n.clients = make(map[uint16]*Session)
 	n.userIdx = 0
-	n.settings = s
 
 	// register client disconnect event
 	event.Register(event.ClientDisconnectEvent, event.Handler(n.onClientDisconnect))
@@ -90,8 +88,20 @@ func (n *Network) Init(port int, s *server.Settings) {
 		event.Trigger(event.ClientConnectEvent, &session)
 
 		// handle new client session
-		go session.Start(n.settings.XorKeyTable)
+		go session.Start(xor)
 	}
+}
+
+func (n *Network) GetUsers() map[uint16]SessionHandler {
+	n.lock.RLock()
+	defer n.lock.RUnlock()
+
+	list := make(map[uint16]SessionHandler)
+	for key, value := range n.clients {
+		list[key] = value
+	}
+
+	return list
 }
 
 // Returns current online user count
@@ -118,19 +128,17 @@ func (n *Network) GetSession(idx uint16) *Session {
 	return nil
 }
 
-// Verifies user specified by index, key and sets it's database index
-func (n *Network) VerifyUser(i uint16, k uint32, ip string, db_idx int32) bool {
+// Verifies user specified by index, key and IP
+func (n *Network) VerifyUser(i uint16, k uint32, ip string) bool {
 	n.lock.Lock()
-	if n.clients[i] != nil && n.clients[i].AuthKey == k && n.clients[i].GetIp() == ip {
-		n.clients[i].Data.Verified = true
-		n.clients[i].Data.LoggedIn = true
-		n.clients[i].Data.AccountId = db_idx
-		n.lock.Unlock()
-		return true
+	defer n.lock.Unlock()
+
+	session, ok := n.clients[i]
+	if !ok {
+		return false
 	}
 
-	n.lock.Unlock()
-	return false
+	return session.AuthKey == k && session.GetIp() == ip
 }
 
 // Sends packet to session by it's index
@@ -145,21 +153,6 @@ func (n *Network) SendToUser(i uint16, writer *Writer) bool {
 	}
 
 	return false
-}
-
-// Checks if account is online and returns user index
-func (n *Network) IsOnline(account int32) uint16 {
-	n.lock.RLock()
-	for _, s := range n.clients {
-		if s.Data.AccountId == account && s.Data.Verified && s.Data.LoggedIn {
-			var index = s.UserIdx
-			n.lock.RUnlock()
-			return index
-		}
-	}
-
-	n.lock.RUnlock()
-	return INVALID_USER_INDEX
 }
 
 // Closes session connection by it's index

@@ -9,8 +9,6 @@ import (
 	"github.com/ubis/Freya/share/encryption"
 	"github.com/ubis/Freya/share/event"
 	"github.com/ubis/Freya/share/log"
-	"github.com/ubis/Freya/share/models/character"
-	"github.com/ubis/Freya/share/models/subpasswd"
 )
 
 // max buffer size
@@ -23,22 +21,38 @@ type Session struct {
 	Encryption encryption.Encryption
 	UserIdx    uint16
 	AuthKey    uint32
-	DataEx     any
-	Data       struct {
-		AccountId     int32 // database account id
-		Verified      bool  // version verification
-		LoggedIn      bool  // auth verification
-		CharVerified  bool  // character delete password verification
-		SubPassword   *subpasswd.Details
-		CharacterList []character.Character
-	}
+	Ses        any
 
 	PeriodicJobs map[string]*PeriodicTask
 	jobMutex     sync.Mutex
 }
 
+func (s *Session) Store(ses any) {
+	s.Ses = ses
+}
+
+func (s *Session) Retrieve() any {
+	return s.Ses
+}
+
+func (s *Session) GetUserIdx() uint16 {
+	return s.UserIdx
+}
+
+func (s *Session) GetAuthKey() uint32 {
+	return s.AuthKey
+}
+
+func (s *Session) GetSeed() uint32 {
+	return s.Encryption.Key.Seed2nd
+}
+
+func (s *Session) GetKeyIdx() uint32 {
+	return s.Encryption.RecvXorKeyIdx
+}
+
 // Starts session goroutine
-func (s *Session) Start(table encryption.XorKeyTable) {
+func (s *Session) Start(table *encryption.XorKeyTable) {
 	// create new receiving buffer
 	s.buffer = make([]byte, MAX_RECV_BUFFER_SIZE)
 	// create map to store periodic tasks
@@ -46,7 +60,7 @@ func (s *Session) Start(table encryption.XorKeyTable) {
 
 	// init encryption
 	s.Encryption = encryption.Encryption{}
-	s.Encryption.Init(&table)
+	s.Encryption.Init(table)
 
 	for {
 		// read data
